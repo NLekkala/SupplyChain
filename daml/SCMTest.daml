@@ -1,0 +1,194 @@
+module SCMTest where
+
+import Daml.Script
+import SCM
+
+
+-- User setup
+setupUser : Text -> Script Party
+setupUser name = script do
+    -- Allocate party
+    allocatedParty <- allocatePartyWithHint name (PartyIdHint name)
+
+    -- Validate user 
+    userId <- validateUserId name
+    
+    -- Create user object 
+    createUser (User userId (Some allocatedParty)) [CanActAs allocatedParty]
+    return allocatedParty
+
+--test setup
+setup : Script ()
+setup = script do
+    -- user_setup_begin
+    alice <- setupUser "Alice-Customer" 
+    bob<- setupUser "Bob-Supplier" 
+
+    let
+        addAlice = Address with
+            street = "M G Road"
+            city="Bengaluru"
+            postalCode=560100
+            country="IND"
+
+        addBob = Address with
+            street="M G Road"
+            city="Bengaluru"
+            postalCode=123456
+            country="IND"
+
+        suppldetail = Suppl with
+            id=bob
+            name = "Bob Supplier"
+            supplAddress=addBob
+            email=Some "bob@dxc.com"
+            contact=9901844434
+
+        custdetail = Cust with
+            id=alice
+            name = "Alice Customer"
+            custAddress=addAlice
+            email=None
+            contact=9901844434
+
+    return()
+
+-------------------------------
+--Test Full Path
+testFull = script do
+
+    -- user_setup_begin
+    alice <- setupUser "Alice-Customer" 
+    bob<- setupUser "Bob-Supplier" 
+
+    let
+        addAlice = Address with
+            street="M G Road"
+            city="Bengaluru"
+            postalCode=560100
+            country="IND"
+
+        addBob = Address with
+            street="M G Road"
+            city="Bengaluru"
+            postalCode=123456
+            country="IND"
+
+        suppldetail = Suppl with
+            id=bob
+            name = "Bob Supplier"
+            supplAddress=addBob
+            email=Some "bob@dxc.com"
+            contact=9901844434
+
+        custdetail = Cust with
+            id=alice
+            name = "Alice Customer"
+            custAddress=addAlice
+            email=None
+            contact=9901844434
+
+    enq1 <- submit alice do
+        createCmd OrderEnquiry with
+            id=""
+            customer=custdetail
+            supplier=suppldetail
+            product=""
+            quantity=0
+            pric=0.0
+
+    enq2 <- submit alice do
+        createCmd OrderEnquiry with
+            id="x"
+            customer=custdetail
+            supplier=suppldetail
+            product=""
+            quantity=0
+            pric=0.0
+
+    --Unhappy path1 - Quantity >0
+    unahhpy1 <- submitMustFail alice do
+        exerciseCmd enq1 PlaceOrder with 
+            eId="Order001"
+            eCustomer = custdetail
+            esupplier = suppldetail
+            eProduct = "Mobile"
+            eQuantity = 0
+            ePric = 45000.00
+
+
+    unahhpy2 <- submitMustFail alice do
+        exerciseCmd enq1 PlaceOrder with 
+            eId = "Order001"
+            eCustomer = custdetail
+            esupplier = suppldetail
+            eProduct = "Mobile"
+            eQuantity = 1
+            ePric = 0.00
+
+    order1 <- submit alice do
+        exerciseCmd enq1 PlaceOrder with 
+            eId = "Order001"
+            eCustomer = custdetail
+            esupplier = suppldetail
+            eProduct = "Mobile"
+            eQuantity = 1
+            ePric = 45000.00
+
+    order2 <- submit alice do
+        exerciseCmd enq2 PlaceOrder with 
+            eId="Order002"
+            eCustomer=custdetail
+            esupplier=suppldetail
+            eProduct="Mobile"
+            eQuantity=1
+            ePric=45000.00
+
+
+    order1Approve<-submit bob do
+        exerciseCmd order1 ApproveOrder
+
+    order2Approve<-submit bob do
+        exerciseCmd order2 ApproveOrder
+
+    --Customer update the Delivery Address
+    customerAddress<-submit alice do
+        exerciseCmd order1Approve UpdateDeliveryAddress with newAddress = addBob
+
+    Some(latest_order1,_)<-queryContractKey @Order alice ("Order001",alice)
+    --Customer update the Delivery Address
+    aliceAddress<-submit alice do
+        exerciseCmd latest_order1 UpdateDeliveryAddress with newAddress = addAlice
+
+    
+    Some(latest_order1,_)<-queryContractKey @Order alice ("Order001",alice)
+    --Supplier delivery address
+    deliver1<-submit bob do
+        exerciseCmd latest_order1 DeliverOrder 
+
+
+    --Customer cancel order -2 
+    cancelorder2<-submit alice do
+        exerciseCmd order2Approve CancelOrder 
+
+    --Unahppy Path - Order can not be cancelled once it is delivered
+    unhappyPath3<-submitMustFail alice do
+        exerciseCmd deliver1 CancelOrder 
+
+    --Unhappy Path - Overpay is not allowed
+    unhappyPath4<-submitMustFail alice do
+        exerciseCmd deliver1 ReceiveOrder with amountToPay=46000.00
+
+        --Unhappy Path - Underpay is not allowed
+    unhappyPath5<-submitMustFail alice do
+        exerciseCmd deliver1 ReceiveOrder with amountToPay=1000.00
+
+    --Customer recieve and pay the order amount
+    paymentID<-submit alice do
+        exerciseCmd deliver1 ReceiveOrder with amountToPay=45000.00
+
+    --Supplier confirm the payment
+    paymentID<-submit bob do
+        exerciseCmd paymentID Paymentconfirmation 
+
+    return()

@@ -1,0 +1,195 @@
+module SCM where 
+
+import DA.Date (toDateUTC)
+
+type EnquiryId = ContractId OrderEnquiry
+type OrderId = ContractId Order
+data OrderStatus =  Ordered|Pending|Approved|Delivered|Cancelled|Received deriving (Eq, Show, Ord)
+
+--Address data record
+data Address = Address 
+  with
+      street:Text
+      city:Text
+      postalCode:Int
+      country:Text
+  deriving (Show, Eq)
+
+--Customer data record
+data Cust = Cust
+  with
+    id:Party
+    name:Text
+    custAddress:Address
+    email:Optional Text
+    contact:Int
+  deriving (Show, Eq)
+
+--Supplier data record
+data Suppl = Suppl
+  with
+    id:Party
+    name:Text
+    supplAddress:Address
+    email:Optional Text
+    contact:Int
+  deriving (Show, Eq)
+
+--Order Enquirey template (Siganotyr Customer)
+template OrderEnquiry
+  with
+    id: Text
+    customer: Cust
+    supplier: Suppl
+    product: Text
+    quantity: Int
+    pric: Decimal
+  where  
+    signatory customer.id
+    observer supplier.id
+    
+    key (id, customer.id) : (Text, Party)
+    maintainer key._2
+
+    --Customer and supplier id can not be same
+    ensure (customer.id/=supplier.id)
+
+    --Customer plact the order
+    choice PlaceOrder : EnquiryId
+      with
+          eId: Text
+          eCustomer: Cust
+          esupplier: Suppl
+          eProduct: Text
+          eQuantity: Int
+          ePric: Decimal
+      controller customer.id
+      do
+        
+        assertMsg "Invalid Quantity" (eQuantity>0)
+
+        assertMsg "Invalid Price" (ePric>0.0)
+
+        create this with 
+            id = eId 
+            customer = eCustomer
+            supplier = esupplier
+            product = eProduct
+            quantity = eQuantity
+            pric = ePric
+
+    --Supplier can Approve the order
+    choice ApproveOrder : OrderId
+      controller supplier.id
+      do
+        now <- getTime 
+        let nowDate = toDateUTC now
+
+        -- Update the order status to "Cancelled"
+        create Order with
+          orderDetail = this
+          status = Pending
+          delAddress = customer.custAddress
+          delDate = nowDate
+            
+-- Order contract
+template Order
+  with
+    orderDetail:OrderEnquiry
+    status: OrderStatus
+    delAddress:Address
+    delDate:Date
+  where
+    signatory orderDetail.customer.id
+    observer orderDetail.supplier.id
+    
+    key (orderDetail.id, orderDetail.customer.id) : (Text, Party)
+    maintainer key._2
+
+    --Customer can Camcel the order
+    choice CancelOrder : ()
+      controller orderDetail.customer.id
+      do
+        assertMsg "Order Status is already Delivered" (status==Pending)
+
+        dummyId<-create Order with
+          status = Cancelled
+          ..
+          exercise dummyId CancelArchieve
+
+    choice CancelArchieve: ()
+      controller orderDetail.customer.id
+      do
+          pure()
+
+    --Customer  can update the delivery address
+    nonconsuming choice UpdateDeliveryAddress:()
+      with 
+        newAddress : Address
+      controller orderDetail.customer.id
+      do
+        assertMsg "Delivery Address  can not be udpated." (status==Pending)
+
+        exercise self AddressChange with iAdd = newAddress
+        return()
+    
+    choice AddressChange:OrderId
+      with 
+        iAdd:Address
+      controller orderDetail.customer.id
+      do
+        create this with delAddress = iAdd
+
+    --Supplier Delivery Address
+    choice DeliverOrder:OrderId
+      controller orderDetail.supplier.id
+      do
+        create this with status = Delivered
+    
+    --Customer Recieve the order and init payment
+    choice ReceiveOrder:ContractId Payment
+      with
+          amountToPay:Decimal
+      controller orderDetail.customer.id
+      do
+        
+        assertMsg "Amount to be paid is not matching with order amount" (amountToPay==intToDecimal(orderDetail.quantity) *  orderDetail.pric )
+        
+        create this with status = Received
+        create Payment with 
+          sender = orderDetail.customer.id
+          receiver = orderDetail.supplier.id
+          amount = amountToPay--intToDecimal(orderDetail.quantity) *  orderDetail.pric 
+          reference = orderDetail.id
+
+    choice PreludeArchive : ()
+      controller (signatory this)
+      do 
+        return ()
+
+--Payment template
+template Payment
+  with
+    sender:Party
+    receiver:Party
+    amount:Decimal
+    reference:Text
+  where
+    signatory sender
+    observer receiver
+
+    key (reference,sender):(Text,Party)
+    maintainer key._2
+
+    ensure (amount > 0.0 && reference /="")
+
+    --Reciever(Supplier) confirm the payment
+    choice Paymentconfirmation:()
+      controller receiver
+      do
+        fetchedContract <- fetchByKey @Order (reference,sender) 
+  
+        exerciseByKey @Order (reference,sender)  PreludeArchive 
+      
+        return()
+  
